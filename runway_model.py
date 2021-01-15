@@ -1,47 +1,37 @@
-## -----
-# Sample code to port a model to Runway
-# Check out the blog post to learn more
-# https://medium.com/runwayml/porting-a-machine-learning-model-from-github-to-runway-in-5-minutes-555c5c9310af
-#
-#
-# Runway Python SDK: https://sdk.runwayml.com/en/latest/
-## -----
-
-# Import our dependencies
-import torch
+import pickle
 import numpy as np
-import runway # Be sure to install it first!: pip3 install runway-python
+import tensorflow as tf
+import dnnlib.tflib as tflib
+import runway
 
-# Setup the model, initialize weights, set the configs of the model, etc.
-# Every model will have a different set of configurations and requirements.
-# Check https://sdk.runwayml.com/en/latest/runway_module.html to see a complete
-# list of supported configs. The setup function should return the model ready to
-# be used.
-@runway.setup(options={"checkpoint": runway.category(description="Pretrained checkpoints to use.",
-                                                choices=['celebAHQ-512', 'celebAHQ-256', 'celeba'],
-                                                default='celebAHQ-512')})
+fmt = dict(func=tflib.convert_images_to_uint8, nchw_to_nhwc=True)
+
+@runway.setup(options={'checkpoint': runway.file(extension='.pkl')})
 def setup(opts):
-    checkpoint = opts['checkpoint']
-    use_gpu = True if torch.cuda.is_available() else False
-    model = torch.hub.load('facebookresearch/pytorch_GAN_zoo:hub', 'PGAN', model_name=checkpoint, pretrained=True, useGPU=use_gpu)
-    return model
+    global Gs
+    tflib.init_tf()
+    with open(opts['checkpoint'], 'rb') as file:
+        _G, _D, Gs = pickle.load(file, encoding='latin1')
+    noise_vars = [var for name, var in Gs.components.synthesis.vars.items() if name.startswith('noise')]
+    rnd = np.random.RandomState()
+    tflib.set_vars({var: rnd.randn(*var.shape.as_list()) for var in noise_vars})
+    return Gs
 
-# Every model needs to have at least one command. Every command allows to send
-# inputs and process outputs. To see a complete list of supported inputs and
-# outputs data types: https://sdk.runwayml.com/en/latest/data_types.html
-@runway.command('generate',
-                inputs={ 'z': runway.vector(length=512, sampling_std=0.5)},
-                outputs={ 'image': runway.image })
-def generate(model, inputs):
+
+generate_inputs = {
+    'z': runway.vector(512, sampling_std=0.5),
+    'truncation': runway.number(min=0, max=1, default=0.8, step=0.01)
+}
+
+@runway.command('generate', inputs=generate_inputs, outputs={'image': runway.image})
+def convert(model, inputs):
     z = inputs['z']
+    truncation = inputs['truncation']
     latents = z.reshape((1, 512))
-    latents = torch.from_numpy(latents)
-    with torch.no_grad():
-        generated_image = model.test(latents.float())
-    generated_image = generated_image.clamp(min=-1, max=1)
-    generated_image = ((generated_image + 1.0) * 255 / 2.0)
-    return generated_image[0].permute(1, 2, 0).numpy().astype(np.uint8)
+    images = model.run(latents, None, truncation_psi=truncation, randomize_noise=False, output_transform=fmt)
+    output = np.clip(images[0], 0, 255).astype(np.uint8)
+    return {'image': output}
 
-# Run the model
+
 if __name__ == '__main__':
-    runway.run(port=5232)
+    runway.run()
