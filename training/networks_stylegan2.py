@@ -12,13 +12,9 @@ import dnnlib
 import dnnlib.tflib as tflib
 from dnnlib.tflib.ops.upfirdn_2d import upsample_2d, downsample_2d, upsample_conv_2d, conv_downsample_2d
 from dnnlib.tflib.ops.fused_bias_act import fused_bias_act
-import functools
 
 # NOTE: Do not import any application-specific modules here!
 # Specify all network parameters as kwargs.
-
-def _i(x): return tf.transpose(x, [0,2,3,1])
-def _o(x): return tf.transpose(x, [0,3,1,2])
 
 #----------------------------------------------------------------------------
 # Get/create weight tensor for a convolution or fully-connected layer.
@@ -422,8 +418,7 @@ def G_synthesis_stylegan2(
     dlatents_in,                        # Input: Disentangled latents (W) [minibatch, num_layers, dlatent_size].
     dlatent_size        = 512,          # Disentangled latent (W) dimensionality.
     num_channels        = 3,            # Number of output color channels.
-    resolution_h        = -1,
-    resolution_w        = -1,
+    resolution          = 1024,         # Output resolution.
     fmap_base           = 16 << 10,     # Overall multiplier for the number of feature maps.
     fmap_decay          = 1.0,          # log2 feature map reduction when doubling the resolution.
     fmap_min            = 1,            # Minimum number of feature maps in any layer.
@@ -436,25 +431,12 @@ def G_synthesis_stylegan2(
     fused_modconv       = True,         # Implement modulated_conv2d_layer() as a single fused op?
     **_kwargs):                         # Ignore unrecognized keyword args.
 
-
-    res_log2_h = int(np.log2(resolution_h))
-    res_log2_w = int(np.log2(resolution_w))
-    
-    res_log2_max = max(res_log2_h, res_log2_w)
-    
-    import fractions
-    frac = fractions.Fraction(resolution_h, resolution_w)
-    ld = frac.limit_denominator()
-    min_h = ld.numerator # fix ratio based on h and w
-    min_w = ld.denominator
-    while (min_h < 4 and min_w < 4):
-        min_h *= 2
-        min_w *= 2
-    
+    resolution_log2 = int(np.log2(resolution))
+    assert resolution == 2**resolution_log2 and resolution >= 4
     def nf(stage): return np.clip(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_min, fmap_max)
     assert architecture in ['orig', 'skip', 'resnet']
     act = nonlinearity
-    num_layers = res_log2_max * 2 - 2
+    num_layers = resolution_log2 * 2 - 2
     images_out = None
 
     # Primary inputs.
@@ -480,28 +462,20 @@ def G_synthesis_stylegan2(
         return apply_bias_act(x, act=act)
 
     # Building blocks for main layers.
-    def block(x, res): # res = 3..res_log2
+    def block(x, res): # res = 3..resolution_log2
         t = x
-        layer_idx = res*2-5
-        fmaps_idx = res-1
         with tf.variable_scope('Conv0_up'):
-            x = layer(x, layer_idx=layer_idx, fmaps=nf(fmaps_idx), kernel=3, up=True)
-        if use_selfattention(res) and toggle_selfattention_g():
-            print('Adding self-attention block to generator')
-            x = non_local_block(x, "SelfAtten", use_sn=True)
+            x = layer(x, layer_idx=res*2-5, fmaps=nf(res-1), kernel=3, up=True)
         with tf.variable_scope('Conv1'):
-            x = layer(x, layer_idx=layer_idx+1, fmaps=nf(fmaps_idx), kernel=3)
-
+            x = layer(x, layer_idx=res*2-4, fmaps=nf(res-1), kernel=3)
         if architecture == 'resnet':
             with tf.variable_scope('Skip'):
-                t = conv2d_layer(t, fmaps=nf(fmaps_idx), kernel=1, up=True, resample_kernel=resample_kernel)
+                t = conv2d_layer(t, fmaps=nf(res-1), kernel=1, up=True, resample_kernel=resample_kernel)
                 x = (x + t) * (1 / np.sqrt(2))
         return x
-
     def upsample(y):
         with tf.variable_scope('Upsample'):
             return upsample_2d(y, k=resample_kernel)
-
     def torgb(x, y, res): # res = 2..resolution_log2
         with tf.variable_scope('ToRGB'):
             t = apply_bias_act(modulated_conv2d_layer(x, dlatents_in[:, res*2-3], fmaps=num_channels, kernel=1, demodulate=False, fused_modconv=fused_modconv))
@@ -509,27 +483,22 @@ def G_synthesis_stylegan2(
 
     # Early layers.
     y = None
-    res_log2_min = int(np.log2(max(min_h,min_w)))
-    # assert min_h == 2**res_log2_min
-    assert res_log2_min < res_log2_max
-    scope = '%dx%d' % (min_h, min_w)
-    with tf.variable_scope(scope):
+    with tf.variable_scope('4x4'):
         with tf.variable_scope('Const'):
-            x = tf.get_variable('const', shape=[1, nf(1), min_h, min_w], initializer=tf.initializers.random_normal())
+            x = tf.get_variable('const', shape=[1, nf(1), 4, 4], initializer=tf.initializers.random_normal())
             x = tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1])
         with tf.variable_scope('Conv'):
             x = layer(x, layer_idx=0, fmaps=nf(1), kernel=3)
         if architecture == 'skip':
-            y = torgb(x, y, res_log2_min)
+            y = torgb(x, y, 2)
 
     # Main layers.
-    for res in range(res_log2_min + 1, res_log2_max + 1):
-        scope = '%dx%d' % (min_h * 2**(res-2), min_w * 2**(res-2))
-        with tf.variable_scope(scope):
+    for res in range(3, resolution_log2 + 1):
+        with tf.variable_scope('%dx%d' % (2**res, 2**res)):
             x = block(x, res)
             if architecture == 'skip':
                 y = upsample(y)
-            if architecture == 'skip' or res == res_log2_max:
+            if architecture == 'skip' or res == resolution_log2:
                 y = torgb(x, y, res)
     images_out = y
 
@@ -542,7 +511,7 @@ def G_synthesis_stylegan2(
 
 def D_stylegan(
     images_in,                          # First input: Images [minibatch, channel, height, width].
-    labels_in,                          # Second input: Labels1 [minibatch, label_size].
+    labels_in,                          # Second input: Labels [minibatch, label_size].
     num_channels        = 3,            # Number of input color channels. Overridden based on dataset.
     resolution          = 1024,         # Input resolution. Overridden based on dataset.
     label_size          = 0,            # Dimensionality of the labels, 0 if no labels. Overridden based on dataset.
@@ -645,8 +614,7 @@ def D_stylegan2(
     images_in,                          # First input: Images [minibatch, channel, height, width].
     labels_in,                          # Second input: Labels [minibatch, label_size].
     num_channels        = 3,            # Number of input color channels. Overridden based on dataset.
-    resolution_h        = -1,
-    resolution_w        = -1,
+    resolution          = 1024,         # Input resolution. Overridden based on dataset.
     label_size          = 0,            # Dimensionality of the labels, 0 if no labels. Overridden based on dataset.
     fmap_base           = 16 << 10,     # Overall multiplier for the number of feature maps.
     fmap_decay          = 1.0,          # log2 feature map reduction when doubling the resolution.
@@ -660,25 +628,13 @@ def D_stylegan2(
     resample_kernel     = [1,3,3,1],    # Low-pass filter to apply when resampling activations. None = no filtering.
     **_kwargs):                         # Ignore unrecognized keyword args.
 
-    res_log2_h = int(np.log2(resolution_h))
-    res_log2_w = int(np.log2(resolution_w))
-    
-    res_log2_max = max(res_log2_h, res_log2_w)
-    
-    import fractions
-    frac = fractions.Fraction(resolution_h, resolution_w)
-    ld = frac.limit_denominator()
-    min_h = ld.numerator # fix ratio based on h and w
-    min_w = ld.denominator
-    while (min_h < 4 and min_w < 4):
-        min_h *= 2
-        min_w *= 2
-    
+    resolution_log2 = int(np.log2(resolution))
+    assert resolution == 2**resolution_log2 and resolution >= 4
     def nf(stage): return np.clip(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_min, fmap_max)
     assert architecture in ['orig', 'skip', 'resnet']
     act = nonlinearity
 
-    images_in.set_shape([None, num_channels, resolution_h, resolution_w])
+    images_in.set_shape([None, num_channels, resolution, resolution])
     labels_in.set_shape([None, label_size])
     images_in = tf.cast(images_in, dtype)
     labels_in = tf.cast(labels_in, dtype)
@@ -692,9 +648,6 @@ def D_stylegan2(
         t = x
         with tf.variable_scope('Conv0'):
             x = apply_bias_act(conv2d_layer(x, fmaps=nf(res-1), kernel=3), act=act)
-        if use_selfattention(res) and toggle_selfattention_d():
-            print('Adding self-attention block to discriminator')
-            x = non_local_block(x, "SelfAtten", use_sn=True)
         with tf.variable_scope('Conv1_down'):
             x = apply_bias_act(conv2d_layer(x, fmaps=nf(res-2), kernel=3, down=True, resample_kernel=resample_kernel), act=act)
         if architecture == 'resnet':
@@ -702,30 +655,25 @@ def D_stylegan2(
                 t = conv2d_layer(t, fmaps=nf(res-2), kernel=1, down=True, resample_kernel=resample_kernel)
                 x = (x + t) * (1 / np.sqrt(2))
         return x
-
     def downsample(y):
         with tf.variable_scope('Downsample'):
             return downsample_2d(y, k=resample_kernel)
 
     # Main layers.
-    res_log2_min = int(np.log2(max(min_h,min_w)))
-    assert res_log2_min < res_log2_max
     x = None
     y = images_in
-    for res in range(res_log2_max, res_log2_min, -1):
-        scope = '%dx%d' % (min_h * 2**(res-2), min_w * 2**(res-2))
-        with tf.variable_scope(scope):
-            if architecture == 'skip' or res == res_log2_max:
+    for res in range(resolution_log2, 2, -1):
+        with tf.variable_scope('%dx%d' % (2**res, 2**res)):
+            if architecture == 'skip' or res == resolution_log2:
                 x = fromrgb(x, y, res)
             x = block(x, res)
             if architecture == 'skip':
                 y = downsample(y)
-                
+
     # Final layers.
-    scope = '%dx%d' % (min_h, min_w)
-    with tf.variable_scope(scope):
+    with tf.variable_scope('4x4'):
         if architecture == 'skip':
-            x = fromrgb(x, y, res_log2_min)
+            x = fromrgb(x, y, 2)
         if mbstd_group_size > 1:
             with tf.variable_scope('MinibatchStddev'):
                 x = minibatch_stddev_layer(x, mbstd_group_size, mbstd_num_features)
@@ -733,7 +681,7 @@ def D_stylegan2(
             x = apply_bias_act(conv2d_layer(x, fmaps=nf(1), kernel=3), act=act)
         with tf.variable_scope('Dense0'):
             x = apply_bias_act(dense_layer(x, fmaps=nf(0)), act=act)
-            
+
     # Output layer with label conditioning from "Which Training Methods for GANs do actually Converge?"
     with tf.variable_scope('Output'):
         x = apply_bias_act(dense_layer(x, fmaps=max(labels_in.shape[1], 1)))
@@ -747,189 +695,3 @@ def D_stylegan2(
     return scores_out
 
 #----------------------------------------------------------------------------
-
-NORMAL_INIT = "normal"
-TRUNCATED_INIT = "truncated"
-ORTHOGONAL_INIT = "orthogonal"
-INITIALIZERS = [NORMAL_INIT, TRUNCATED_INIT, ORTHOGONAL_INIT]
-
-def weight_initializer(initializer=NORMAL_INIT, stddev=0.02):
-  """Returns the initializer for the given name.
-
-  Args:
-    initializer: Name of the initalizer. Use one in INITIALIZERS.
-    stddev: Standard deviation passed to initalizer.
-
-  Returns:
-    Initializer from `tf.initializers`.
-  """
-  if initializer == NORMAL_INIT:
-    return tf.initializers.random_normal(stddev=stddev)
-  if initializer == TRUNCATED_INIT:
-    return tf.initializers.truncated_normal(stddev=stddev)
-  if initializer == ORTHOGONAL_INIT:
-    return tf.initializers.orthogonal()
-  raise ValueError("Unknown weight initializer {}.".format(initializer))
-
-def spectral_norm(inputs, epsilon=1e-12, singular_value="left", return_normalized=True, power_iteration_rounds=1):
-  """Performs Spectral Normalization on a weight tensor.
-
-  Details of why this is helpful for GAN's can be found in "Spectral
-  Normalization for Generative Adversarial Networks", Miyato T. et al., 2018.
-  [https://arxiv.org/abs/1802.05957].
-
-  Args:
-    inputs: The weight tensor to normalize.
-    epsilon: Epsilon for L2 normalization.
-    singular_value: Which first singular value to store (left or right). Use
-      "auto" to automatically choose the one that has fewer dimensions.
-
-  Returns:
-    The normalized weight tensor.
-  """
-  if len(inputs.shape) < 2:
-    raise ValueError(
-        "Spectral norm can only be applied to multi-dimensional tensors")
-
-  # The paper says to flatten convnet kernel weights from (C_out, C_in, KH, KW)
-  # to (C_out, C_in * KH * KW). Our Conv2D kernel shape is (KH, KW, C_in, C_out)
-  # so it should be reshaped to (KH * KW * C_in, C_out), and similarly for other
-  # layers that put output channels as last dimension. This implies that w
-  # here is equivalent to w.T in the paper.
-  w = tf.reshape(inputs, (-1, inputs.shape[-1]))
-
-  # Choose whether to persist the first left or first right singular vector.
-  # As the underlying matrix is PSD, this should be equivalent, but in practice
-  # the shape of the persisted vector is different. Here one can choose whether
-  # to maintain the left or right one, or pick the one which has the smaller
-  # dimension. We use the same variable for the singular vector if we switch
-  # from normal weights to EMA weights.
-  var_name = inputs.name.replace("/ExponentialMovingAverage", "").split("/")[-1]
-  var_name = var_name.split(":")[0] + "/u_var"
-  if singular_value == "auto":
-    singular_value = "left" if w.shape[0] <= w.shape[1] else "right"
-  u_shape = (w.shape[0], 1) if singular_value == "left" else (1, w.shape[-1])
-  u_var = tf.get_variable(
-      var_name,
-      shape=u_shape,
-      dtype=w.dtype,
-      initializer=tf.random_normal_initializer(),
-      collections=[tf.GraphKeys.LOCAL_VARIABLES],
-      trainable=False, use_resource=True)
-  u = u_var
-
-  # Use power iteration method to approximate the spectral norm.
-  # The authors suggest that one round of power iteration was sufficient in the
-  # actual experiment to achieve satisfactory performance.
-  for _ in range(power_iteration_rounds):
-    if singular_value == "left":
-      # `v` approximates the first right singular vector of matrix `w`.
-      v = tf.math.l2_normalize(
-          tf.matmul(tf.transpose(w), u), axis=None, epsilon=epsilon)
-      u = tf.math.l2_normalize(tf.matmul(w, v), axis=None, epsilon=epsilon)
-    else:
-      v = tf.math.l2_normalize(tf.matmul(u, w, transpose_b=True),
-                               epsilon=epsilon)
-      u = tf.math.l2_normalize(tf.matmul(v, w), epsilon=epsilon)
-  # Update the approximation.
-  with tf.control_dependencies([tf.assign(u_var, u, name="update_u")]):
-    u = tf.identity(u)
-  # The authors of SN-GAN chose to stop gradient propagating through u and v
-  # and we maintain that option.
-  u = tf.stop_gradient(u)
-  v = tf.stop_gradient(v)
-  if singular_value == "left":
-    norm_value = tf.matmul(tf.matmul(tf.transpose(u), w), v)
-  else:
-    norm_value = tf.matmul(tf.matmul(v, w), u, transpose_b=True)
-  norm_value.shape.assert_is_fully_defined()
-  norm_value.shape.assert_is_compatible_with([1, 1])
-  if return_normalized:
-    w_normalized = w / norm_value
-    # Deflate normalized weights to match the unnormalized tensor.
-    w_tensor_normalized = tf.reshape(w_normalized, inputs.shape)
-    return w_tensor_normalized
-  else:
-    return w, norm_value
-
-def conv2d(inputs, output_dim, k_h, k_w, d_h, d_w, stddev=0.02, name="conv2d",
-           use_sn=False, use_bias=True):
-  """Performs 2D convolution of the input."""
-  with tf.variable_scope(name):
-    w = tf.get_variable(
-        "kernel", [k_h, k_w, inputs.shape[-1].value, output_dim],
-        initializer=weight_initializer(stddev=stddev), use_resource=True)
-    if use_sn:
-      w = spectral_norm(w)
-    outputs = tf.nn.conv2d(inputs, w, strides=[1, d_h, d_w, 1], padding="SAME")
-    if use_bias:
-      bias = tf.get_variable(
-          "bias", [output_dim], initializer=tf.constant_initializer(0.0), use_resource=True)
-      outputs += bias
-  return outputs
-
-conv1x1 = functools.partial(conv2d, k_h=1, k_w=1, d_h=1, d_w=1)
-
-
-def non_local_block(x, name, use_sn):
-  """Self-attention (non-local) block.
-
-  This method is used to exactly reproduce SAGAN and ignores Gin settings on
-  weight initialization and spectral normalization.
-
-
-  Args:
-    x: Input tensor of shape [batch, h, w, c].
-    name: Name of the variable scope.
-    use_sn: Apply spectral norm to the weights.
-
-  Returns:
-    A tensor of the same shape after self-attention was applied.
-  """
-  def _spatial_flatten(inputs):
-    shape = inputs.shape
-    return tf.reshape(inputs, (-1, shape[1] * shape[2], shape[3]))
-
-  with tf.variable_scope(name):
-    x = _i(x)
-    h, w, num_channels = x.get_shape().as_list()[1:]
-    num_channels_attn = num_channels // 8
-    num_channels_g = num_channels // 2
-
-    # Theta path
-    theta = conv1x1(x, num_channels_attn, name="conv2d_theta", use_sn=use_sn,
-                    use_bias=False)
-    theta = _spatial_flatten(theta)
-
-    # Phi path
-    phi = conv1x1(x, num_channels_attn, name="conv2d_phi", use_sn=use_sn,
-                  use_bias=False)
-    phi = tf.layers.max_pooling2d(inputs=phi, pool_size=[2, 2], strides=2)
-    phi = _spatial_flatten(phi)
-
-    attn = tf.matmul(theta, phi, transpose_b=True)
-    attn = tf.nn.softmax(attn)
-
-    # G path
-    g = conv1x1(x, num_channels_g, name="conv2d_g", use_sn=use_sn,
-                use_bias=False)
-    g = tf.layers.max_pooling2d(inputs=g, pool_size=[2, 2], strides=2)
-    g = _spatial_flatten(g)
-
-    attn_g = tf.matmul(attn, g)
-    attn_g = tf.reshape(attn_g, [-1, h, w, num_channels_g])
-    sigma = tf.get_variable("sigma", [], initializer=tf.zeros_initializer(), use_resource=True)
-    attn_g = conv1x1(attn_g, num_channels, name="conv2d_attn_g", use_sn=use_sn,
-                     use_bias=False)
-    out = x + sigma * attn_g
-    out = _o(out)
-    return out
-
-def use_selfattention(res):
-    return 2**res == 64
-
-def toggle_selfattention_g():
-    return False
-
-def toggle_selfattention_d():
-    return False
