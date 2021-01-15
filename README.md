@@ -1,10 +1,10 @@
 # Runway Model Template
 
-[![RunwayML Badge](https://open-app.runwayml.com/gh-badge.svg)](https://open-app.runwayml.com/)
+<a href="http://sdk.runwayml.com" target="_blank"><img src="https://runway.nyc3.cdn.digitaloceanspaces.com/assets/github/runway-badge.png" width=100/></a>
 
 This repository contains an example model template that can be used as reference when porting machine learning models to [Runway](https://runwayml.com/). This template uses the Runway Model SDK Python module, check out the [module documentation](https://sdk.runwayml.com) for more info.
 
-> See the *Importing Models into Runway* [tutorial](https://learn.runwayml.com/#/how-to/import-models) for a walk-through illustrating how to port a model to Runway.
+> See the *Importing Models into Runway* [tutorial](https://docs.runwayapp.ai/#/importing) for a walk-through illustrating how to port a model to Runway.
 
 Each Runway model consists of two special files:
 
@@ -26,9 +26,9 @@ from example_model import ExampleModel
 
 # Setup the model, initialize weights, set the configs of the model, etc.
 # Every model will have a different set of configurations and requirements.
-# Check https://sdk.runwayml.com/en/latest/runway_module.html to see a complete
-# list of supported configs. The setup function should return the model ready to
-# be used.
+# Check https://docs.runwayapp.ai/#/python-sdk to see a complete list of
+# supported configs. The setup function should return the model ready to be
+# used.
 setup_options = {
     'truncation': number(min=5, max=100, step=1, default=10),
     'seed': number(min=0, max=1000000)

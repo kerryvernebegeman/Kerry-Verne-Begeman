@@ -22,24 +22,42 @@
 
 import random
 from PIL import Image
+import numpy as np
+import face_recognition
 
-class ExampleModel():
+class FaceTracker():
 
     def __init__(self, options):
-        random.seed(options['seed'])
-        self.truncation = options['truncation']
+        self.known_faces = {}
+        self.index = 0
+        pass
 
-    # Generate an image based on some text.
-    def run_on_input(self, caption_text):
+    # Process an input_image
+    def process(self, input_image):
+        input_image = np.array(input_image)
+        height, width = input_image.shape[0:2]
 
-        # This is an example of how you could use some input from
-        # @runway.setup(), like options['truncation'], later inside a
-        # function called by @runway.command().
-        text = caption_text[0:self.truncation]
+        face_locations = face_recognition.face_locations(input_image)
+        face_encodings = face_recognition.face_encodings(input_image, face_locations)
 
-        # Return a red image if the input text is "red",
-        # otherwise return a blue image.
-        if text == 'red':
-            return Image.new('RGB', (512, 512), color = 'red')
-        else:
-            return Image.new('RGB', (512, 512), color = 'blue')
+        found_faces = []
+
+        for face_location, face_encoding in zip(face_locations, face_encodings):
+            matches = face_recognition.compare_faces([self.known_faces[f] for f in self.known_faces ], face_encoding)
+
+            # if there is a match
+            if True in matches:
+                face_index = matches.index(True)
+            
+            # if there is no match
+            else:
+                self.known_faces[self.index] = face_encoding
+                face_index = self.index
+                self.index += 1
+
+            top, right, bottom, left = face_location
+            box = [ float(left)/width, float(top)/height, float(right)/width, float(bottom)/height ]
+
+            found_faces.append({"index": face_index, "box": box})
+
+        return found_faces
