@@ -60,7 +60,7 @@ def setup(opts):
 # inputs and process outputs. To see a complete list of supported inputs and
 # outputs data types: https://sdk.runwayml.com/en/latest/data_types.html
 @runway.command(name='generate',
-                inputs={ 'caption': text() },
+                inputs={ 'image': image(width=512, height=512)
                 outputs={ 'image': image(width=512, height=512) },
                 description='Generates a red square when the input text input is "red".')
 def generate(model, args):
