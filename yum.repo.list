@@ -1,3 +1,17 @@
+Certificate-Based Repositories
+# Managed by (rhsm) subscription-manager
+#
+# If this file is empty and this system is subscribed consider 
+# a "yum repolist" to refresh available repos
+#
+
+[]
+gpgcheck = 1
+sslverify = 1
+sslcacert = /etc/rhsm/ca/redhat-uep.pem
+sslclientkey = /etc/pki/entitlement/6951533640253412352-key.pem
+sslclientcert = /etc/pki/entitlement/6951533640253412352.pem
+
 # CentOS-Base.repo
 #
 # The mirror system uses the connecting IP address of the client and the
